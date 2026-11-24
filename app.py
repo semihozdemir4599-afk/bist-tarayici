@@ -24,7 +24,7 @@ with st.spinner("Veriler alınıyor..."):
         st.error("Veri alınamadı: " + type(e).__name__)
         st.stop()
 
-st.write(tv.market_line())
+st.write(tv.market_line(d))
 st.caption(f"{len(d)} hisse tarandı.")
 
 tab1, tab2, tab3 = st.tabs(["Tavana yürüyenler", "Şu an tavanda", "Trend adayları (BIST 100)"])
@@ -34,7 +34,8 @@ with tab1:
     x = tv.tavan_candidates(d, min_change=min_chg, top=60)
     st.subheader(f"Tavana yürüyenler ({len(x)} hisse)")
     st.dataframe(tv.tavan_table(x), use_container_width=True, hide_index=True)
-    st.caption("Giriş: anlık fiyat (gecikmeli). Hedef: tavan fiyatı. Stop: günün en düşüğü.")
+    st.caption("Giriş: anlık fiyat (gecikmeli). Hedef: tavan fiyatı. "
+               "Stop: günün düşüğü ya da giriş -%3'ten hangisi yakınsa.")
 
 with tab2:
     x = tv.tavan_locked(d, top=100)
@@ -43,7 +44,7 @@ with tab2:
 
 with tab3:
     ms = st.slider("Minimum trend skoru", 0, 6, 5)
-    x = tv.trend_candidates(d, tv.read_list("tickers.txt"), min_score=ms, top=60)
+    x = tv.trend_candidates(d, min_score=ms, top=60)
     st.subheader(f"Trend adayları ({len(x)} hisse)")
     st.dataframe(tv.trend_table(x), use_container_width=True, hide_index=True)
 

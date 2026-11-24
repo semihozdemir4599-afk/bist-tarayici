@@ -94,8 +94,9 @@ def tavan_locked(d, top=40):
     return x.sort_values(["tavan_skor", "hacim_mn"], ascending=False).head(top)
 
 
-def trend_candidates(d, universe, min_score=5, top=15):
-    x = d[d["name"].isin(universe) & (d["trend_skor"] >= min_score)]
+def trend_candidates(d, universe=None, min_score=5, top=15):
+    names = universe if universe else top100(d)["name"]
+    x = d[d["name"].isin(names) & (d["trend_skor"] >= min_score)]
     return x.sort_values(["trend_skor", "relvol"], ascending=False).head(top)
 
 
@@ -109,7 +110,8 @@ def tavan_table(x):
         "RSI": x["RSI"].round(1).values,
         "Giriş": x["close"].round(2).values,
         "Hedef": x["tavan_fiyat"].values,
-        "Stop": x["low"].round(2).values,
+        # Stop: günün düşüğü ya da giriş -%3'ten hangisi yakınsa (risk en fazla %3)
+        "Stop": np.maximum(x["low"], x["close"] * 0.97).round(2).values,
         "Tavan sinyalleri": x["tavan_sinyal"].values,
     }, columns=TAVAN_COLS)
 
@@ -143,17 +145,20 @@ def trend_table(x):
     }, columns=TREND_COLS)
 
 
-def market_line():
+def top100(d):
+    """BIST 100 yaklaşığı: piyasa değeri en büyük 100 hisse."""
+    return d.sort_values("market_cap_basic", ascending=False).head(100)
+
+
+def market_line(d):
     try:
-        _, x = (Query().set_markets("turkey").set_tickers("BIST:XU100")
-                .select("close", "change", "EMA20", "EMA50").get_scanner_data())
-        r = x.iloc[0]
-        pos = "EMA20 üstünde" if r["close"] > r["EMA20"] else "EMA20 altında"
-        pos2 = "EMA50 üstünde" if r["close"] > r["EMA50"] else "EMA50 altında"
-        return (f"BIST 100: {r['close']:,.0f} ({r['change']:+.2f}%) | {pos}, {pos2} "
-                f"(EMA20 {r['EMA20']:,.0f}, EMA50 {r['EMA50']:,.0f})")
+        x = top100(d)
+        up, down = int((x["change"] > 0).sum()), int((x["change"] < 0).sum())
+        above = 100 * (x["close"] > x["EMA20"]).mean()
+        return (f"Piyasa (en büyük 100 hisse): {up} yükselen / {down} düşen | "
+                f"medyan değişim {x['change'].median():+.2f}% | %{above:.0f}'i EMA20 üstünde")
     except Exception:
-        return "BIST 100 durumu alınamadı."
+        return "Piyasa özeti hesaplanamadı."
 
 
 # ---------------------------------------------------------------- Başarı takibi
@@ -180,16 +185,38 @@ def todays_progress(d, now):
             f"{len(got)}" + (" (" + ", ".join(got) + ")" if got else ""))
 
 
+def _minutes(now):
+    return now.hour * 60 + now.minute
+
+
+def in_session(now):
+    """Veri taze mi? Hafta içi 10:20-18:05 (veri 15 dk gecikmeli)."""
+    return now.weekday() < 5 and 10 * 60 + 20 <= _minutes(now) <= 18 * 60 + 5
+
+
+def in_settle_window(now):
+    """Kapanış değerlendirmesi: hafta içi 18:10-20:00."""
+    return now.weekday() < 5 and 18 * 60 + 10 <= _minutes(now) <= 20 * 60
+
+
 def log_run(x, now):
-    if x.empty:
-        return
-    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    """Adayları kaydeder. Seans dışında ya da veri eskiyse (tatil) kaydetmez. True/False döner."""
+    if x.empty or not in_session(now):
+        return False
     rows = pd.DataFrame({
         "tarih": now.strftime("%Y-%m-%d"), "saat": now.strftime("%H:%M"),
         "hisse": x["name"].values, "fiyat": x["close"].round(2).values,
         "degisim": x["change"].round(2).values, "skor": x["tavan_skor"].values,
         "relvol": x["relvol"].round(2).values, "tavan_oldu": ""})
+    log = _read_log()
+    if not log.empty:
+        last = log[(log["tarih"] == log["tarih"].iloc[-1]) & (log["saat"] == log["saat"].iloc[-1])]
+        if last["tarih"].iloc[0] != now.strftime("%Y-%m-%d") and \
+                set(zip(last["hisse"], last["fiyat"])) == set(zip(rows["hisse"], rows["fiyat"])):
+            return False  # önceki günün aynısı: resmi tatil, veri eski
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     rows.to_csv(LOG_PATH, mode="a", header=not os.path.exists(LOG_PATH), index=False)
+    return True
 
 
 def settle_and_summarize(d, now):

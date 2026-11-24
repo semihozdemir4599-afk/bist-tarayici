@@ -114,12 +114,15 @@ def main():
     run_raw = tv.tavan_candidates(d)
     run_t = tv.tavan_table(run_raw)
     lock_t = tv.lock_table(tv.tavan_locked(d))
-    trend_t = tv.trend_table(tv.trend_candidates(d, tv.read_list("tickers.txt")))
-    mline = tv.market_line()
+    trend_t = tv.trend_table(tv.trend_candidates(d))
+    mline = tv.market_line(d)
 
-    progress = tv.todays_progress(d, now)
+    fresh = tv.in_session(now)
+    progress = tv.todays_progress(d, now) if fresh else ""
     tv.log_run(run_raw, now)
-    summary = tv.settle_and_summarize(d, now) if now.hour >= 18 else ""
+    summary = tv.settle_and_summarize(d, now) if tv.in_settle_window(now) else ""
+    if not fresh and not summary:
+        mline += "\n(Seans dışı: veri son kapanışa aittir, kayıt tutulmadı.)"
 
     text = build_text(stamp, mline, run_t, lock_t, trend_t, progress, summary)
     html = f"""<html><head>{STYLE}</head><body>
