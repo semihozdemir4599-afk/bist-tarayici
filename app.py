@@ -27,7 +27,8 @@ with st.spinner("Veriler alınıyor..."):
 st.write(tv.market_line(d))
 st.caption(f"{len(d)} hisse tarandı.")
 
-tab1, tab2, tab3 = st.tabs(["Tavana yürüyenler", "Şu an tavanda", "Trend adayları (BIST 100)"])
+tab1, tab2, tab3, tab4 = st.tabs(["Tavana yürüyenler", "Şu an tavanda",
+                                  "Trend adayları (BIST 100)", "Yarının adayları"])
 
 with tab1:
     min_chg = st.number_input("Minimum gün içi değişim %", 0.0, 9.0, 4.0, 0.5)
@@ -47,6 +48,13 @@ with tab3:
     x = tv.trend_candidates(d, min_score=ms, top=60)
     st.subheader(f"Trend adayları ({len(x)} hisse)")
     st.dataframe(tv.trend_table(x), use_container_width=True, hide_index=True)
+
+with tab4:
+    x = tv.next_day_candidates(d, top=60)
+    st.subheader(f"Yarının olası tavan adayları ({len(x)} hisse)")
+    st.dataframe(tv.next_table(x), use_container_width=True, hide_index=True)
+    st.caption("Gün sonu (kapanış) verisine göre anlamlıdır. Seans içinde bakıyorsan liste "
+               "henüz oluşmamış gün verisini yansıtır. Tavan garantisi değildir.")
 
 with st.expander("Skorlar nasıl hesaplanıyor?"):
     st.markdown("""

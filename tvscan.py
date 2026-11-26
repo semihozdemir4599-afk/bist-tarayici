@@ -190,13 +190,13 @@ def _minutes(now):
 
 
 def in_session(now):
-    """Veri taze mi? Hafta içi 10:20-18:05 (veri 15 dk gecikmeli)."""
-    return now.weekday() < 5 and 10 * 60 + 20 <= _minutes(now) <= 18 * 60 + 5
+    """Seans verisi taze mi? Hafta içi 10:05-18:05 (veri 15 dk gecikmeli: 10:10 raporu 09:55 verisidir)."""
+    return now.weekday() < 5 and 10 * 60 + 5 <= _minutes(now) <= 18 * 60 + 5
 
 
 def in_settle_window(now):
-    """Kapanış değerlendirmesi: hafta içi 18:10-20:00."""
-    return now.weekday() < 5 and 18 * 60 + 10 <= _minutes(now) <= 20 * 60
+    """Gün sonu raporu: hafta içi 18:20-20:00 (18:30 raporu 18:15 verisini, yani kapanışı içerir)."""
+    return now.weekday() < 5 and 18 * 60 + 20 <= _minutes(now) <= 20 * 60
 
 
 def log_run(x, now):
@@ -248,4 +248,119 @@ def settle_and_summarize(d, now):
         f"  Tavan skoru >=4: {rate(first[first['skor'] >= 4])}",
         f"  Tavan skoru <=3: {rate(first[first['skor'] <= 3])}",
         f"  Göreceli hacim >=2x: {rate(first[first['relvol'] >= 2])}",
+    ])
+
+
+# ---------------------------------------------------------------- Yarının tavan adayları
+NEXT_LOG = "log/yarin.csv"
+NEXT_LOG_COLS = ["tarih", "hisse", "kapanis", "degisim", "skor", "relvol", "dokundu", "kapandi"]
+NEXT_COLS = ["Hisse", "Tavan skoru (0-6)", "Hacim (mn TL)", "Değişim %", "RSI", "Kapanış",
+             "Yarın tavan fiyatı", "Durum", "Tavan sinyalleri"]
+
+
+def next_day_candidates(d, min_score=5, top=20):
+    """Gün sonu verisiyle ertesi gün için izleme listesi (tavan skoru yüksek olanlar)."""
+    x = d[d["tavan_skor"] >= min_score]
+    return x.sort_values(["tavan_skor", "hacim_mn"], ascending=False).head(top)
+
+
+def next_table(x):
+    return pd.DataFrame({
+        "Hisse": x["name"].values,
+        "Tavan skoru (0-6)": x["tavan_skor"].values,
+        "Hacim (mn TL)": x["hacim_mn"].round(1).values,
+        "Değişim %": x["change"].round(2).values,
+        "RSI": x["RSI"].round(1).values,
+        "Kapanış": x["close"].round(2).values,
+        "Yarın tavan fiyatı": (x["close"] * (1 + LIMIT_PCT / 100)).round(2).values,
+        "Durum": np.where(x["change"] >= 9.5, "Tavanda kapattı", "Güçlü kapanış"),
+        "Tavan sinyalleri": x["tavan_sinyal"].values,
+    }, columns=NEXT_COLS)
+
+
+def _read_next():
+    if not os.path.exists(NEXT_LOG):
+        return pd.DataFrame(columns=NEXT_LOG_COLS)
+    return pd.read_csv(NEXT_LOG, dtype={"hisse": "object", "dokundu": "object",
+                                        "kapandi": "object"})
+
+
+def _prev_weekday(day):
+    from datetime import timedelta
+    p = day - timedelta(days=1)
+    while p.weekday() >= 5:
+        p -= timedelta(days=1)
+    return p
+
+
+def log_next(x, now):
+    """Gün sonu listesini kaydeder (günde bir kez; tatilde eski veri tekrarını atlar)."""
+    if x.empty or not in_settle_window(now):
+        return False
+    today = now.strftime("%Y-%m-%d")
+    rows = pd.DataFrame({
+        "tarih": today, "hisse": x["name"].values, "kapanis": x["close"].round(2).values,
+        "degisim": x["change"].round(2).values, "skor": x["tavan_skor"].values,
+        "relvol": x["relvol"].round(2).values, "dokundu": "", "kapandi": ""})
+    log = _read_next()
+    if not log.empty:
+        if (log["tarih"] == today).any():
+            return False
+        last = log[log["tarih"] == log["tarih"].iloc[-1]]
+        if set(zip(last["hisse"], last["kapanis"])) == set(zip(rows["hisse"], rows["kapanis"])):
+            return False  # önceki günün aynısı: resmi tatil, veri eski
+    os.makedirs(os.path.dirname(NEXT_LOG), exist_ok=True)
+    rows.to_csv(NEXT_LOG, mode="a", header=not os.path.exists(NEXT_LOG), index=False)
+    return True
+
+
+def settle_next(d, now):
+    """Önceki günün 'yarın adayları'nı bugünkü kapanış verisiyle değerlendirir, özet döndürür.
+    Tavana dokundu = gün içi en yüksek >= %9,5; tavanda kapattı = kapanış değişimi >= %9,5."""
+    if not in_settle_window(now):
+        return ""
+    log = _read_next()
+    if log.empty:
+        return ""
+    today = now.strftime("%Y-%m-%d")
+    pending = log[(log["tarih"] < today) & (~log["dokundu"].isin(["0", "1"]))]
+    if not pending.empty:
+        last_date = pending["tarih"].max()
+        idx = list(pending.index[pending["tarih"] == last_date])
+        cur = d.drop_duplicates("name").set_index("name")
+        same = [(log.at[i, "hisse"] in cur.index)
+                and abs(cur.at[log.at[i, "hisse"], "close"] - log.at[i, "kapanis"]) < 0.005
+                for i in idx]
+        stale = len(idx) >= 5 and all(same)  # bugünkü veri dünküyle aynı: tatil
+        if last_date == _prev_weekday(now.date()).strftime("%Y-%m-%d") and not stale:
+            for i in idx:
+                h = log.at[i, "hisse"]
+                if h not in cur.index:
+                    continue
+                r = cur.loc[h]
+                prev = r["close"] / (1 + r["change"] / 100)
+                log.at[i, "dokundu"] = "1" if r["high"] / prev - 1 >= 0.095 else "0"
+                log.at[i, "kapandi"] = "1" if r["change"] >= 9.5 else "0"
+            log.to_csv(NEXT_LOG, index=False)
+
+    done = log[log["dokundu"].isin(["0", "1"])]
+    if done.empty:
+        return ""
+
+    def rate(x, col):
+        k = int((x[col] == "1").sum())
+        return f"{k}/{len(x)} (%{100 * k / len(x):.0f})" if len(x) else "-"
+
+    last = done[done["tarih"] == done["tarih"].max()]
+    tv_ = done[done["degisim"] >= 9.5]
+    gk = done[done["degisim"] < 9.5]
+    return "\n".join([
+        "YARIN-ADAYI TAKİBİ (önceki gün 18:30 listesinin ertesi gün sonucu)",
+        f"Son liste ({last['tarih'].iloc[0]}): tavana dokunan {rate(last, 'dokundu')}, "
+        f"tavanda kapatan {rate(last, 'kapandi')}",
+        f"Tüm günler ({done['tarih'].nunique()} gün): dokunan {rate(done, 'dokundu')}, "
+        f"tavanda kapatan {rate(done, 'kapandi')}",
+        f"  Tavanda kapatanlar: dokunan {rate(tv_, 'dokundu')}, tavanda kapatan {rate(tv_, 'kapandi')}",
+        f"  Güçlü kapanış (tavan değil): dokunan {rate(gk, 'dokundu')}, "
+        f"tavanda kapatan {rate(gk, 'kapandi')}",
     ])
